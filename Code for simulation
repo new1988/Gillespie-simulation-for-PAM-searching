@@ -1,0 +1,158 @@
+import numpy as np
+from scipy.special import comb  
+import matplotlib.pyplot as plt  
+import math
+import pandas as pd
+import seaborn as sns
+from scipy.optimize import curve_fit
+
+def simuDNA(DNAlength,PAM_space,PAM_uidiff):
+    Ui = np.random.normal(loc=0,scale=1,size=DNAlength)##Ui normal dist
+    ## add PAM with spacing ~poisson(16)
+    PAMi = np.zeros(DNAlength)
+    ii = 0
+    while ii < DNAlength:
+        ii += np.random.poisson(PAM_space)
+        if ii < DNAlength:
+            PAMi[ii] = PAM_uidiff
+        else: break
+    # simulated DNA Ui with PAM spacing
+    Ui_PAM = Ui+PAMi
+    UI_data = pd.DataFrame(Ui_PAM).to_csv('Ui.csv', index = False, header = False) 
+    return Ui_PAM, PAMi
+
+def MCmove(Ui_PAM, PAMi, site0, t0, uniqPAM, tau0, koff):
+    move = [site0]
+    t = [t0]
+    reactions = []
+    foundPAM = []
+    foundDNA = [site0]
+    lastmove = ['r_disociate']
+    tslide = t0
+    i=0
+    Amatrix = pd.DataFrame(data=None,columns=["r_left","r_right","r_pam","r_dissociate"])
+       
+    # Monte Carlo moves
+    while len(foundPAM) < uniqPAM:
+        
+        site = move[-1]
+
+        # site left or right location
+    
+        pace = 1
+        if site + pace > DNAlength-1: 
+            site_left=DNAlength-pace
+            site_right=site+pace-DNAlength
+        elif site - pace < 0:
+            site_left=site-pace+DNAlength
+            site_right=site+pace
+        else:
+            site_left=site-pace
+            site_right=site+pace
+        
+        # reaction rates for Cas jumping left/right, into a PAM, dissociate from DNA
+        if Ui_PAM[site_left] - Ui_PAM[site] >0:
+            r_left = 1/math.exp(Ui_PAM[site_left] - Ui_PAM[site])
+        else :
+            r_left =1
+        
+        if Ui_PAM[site_right] - Ui_PAM[site] >0:
+            r_right = 1/math.exp(Ui_PAM[site_right] - Ui_PAM[site])
+        else :
+            r_right =1
+        
+        if PAMi[site] < 0 :
+            r_pam = 100
+        else :
+            r_pam =0
+        
+        if tslide >= 1/koff:
+            r_dissociate = 10000
+        else:
+            r_dissociate = 0
+        
+        #if Ens - Ui_PAM[site] >0 :
+        #    r_dissociate = 1/math.exp(Ens - Ui_PAM[site])
+        #else:
+        #    r_dissociate = 1
+        
+         A = np.array([r_left,r_right,r_pam,r_dissociate])
+        A0=A.sum()
+        A = A/A0 # unified to get prob weights of each reaction
+        
+        
+        delta_t = np.random.exponential(tau0/A0)
+
+        # Random choose reaction based on rates prob weight
+        reaction = np.random.choice(["r_left","r_right","r_pam","r_dissociate"], p=A)
+        if reaction == 'r_left':
+            site = site_left
+            delta_t = delta_t + 0.04/15
+        elif reaction == 'r_right':
+            site = site_right
+            delta_t = delta_t + 0.04/15
+        elif reaction == 'r_pam':
+            #pam found number update
+            if site not in foundPAM:
+                foundPAM.append(site)
+                #print(foundPAM)
+            site = np.random.choice([site_left,site_right])
+            delta_t = delta_t + 0.16        
+        elif reaction == 'r_dissociate':
+            site = np.random.choice(DNAlength-1)
+            delta_t = delta_t + 0.1
+           
+        #update after reaction
+        move.append(site)
+        t.append(t[-1] + delta_t)
+        reactions.append(reaction)
+        lastmove =reactions[-1]
+        
+        if reaction == "r_dissociate":
+            tslide = 0
+        else:
+            tslide = tslide+delta_t 
+return pd.concat([pd.DataFrame(t,columns=["t"]),pd.DataFrame(move,columns=["move"]),pd.DataFrame(reactions,columns=["reactions"])],axis=1)#, Amatrix
+
+#Ui engery decrease when met PAM
+PAM_uidiff = -5
+#tau0 is constant, suppose 10^-5 sec
+tau0=1e-4
+# Stop criteria for MC loop:
+uniqPAM=1000
+rr=MCmove(dx, dy,np.random.choice(DNAlength-1),t0,uniqPAM,tau0,100)
+
+out  = pd.DataFrame(data=None,columns=["move",'dissociate number', 'times met PAM', 'uinique PAM', 'unique DNA site', 'runtime', 'dissociate rate', "PAM repeats"])
+for koff in [1e-2,0.1,1,5,10,100,1e3,1e4]:
+    dx, dy = simuDNA(DNAlength,PAM_space,PAM_uidiff)
+    res = MCmove(dx, dy,np.random.choice(DNAlength-1),t0,1000,tau0,koff)
+    #plt.plot(res["move"])
+    
+    x=res.loc[res["reactions"] == "r_dissociate"]
+    y=res.loc[res["reactions"] == "r_pam"]
+    
+    
+    move_n = len(res.index)
+    dissoc_n = len(x.index)
+    pam_n=len(y.index)
+    unipam_n=len(np.unique(y["move"]))
+    unisite_n=len(np.unique(res["move"]))
+    runtime=res.iloc[-1,0]
+    rdiss = dissoc_n/(runtime-0.1*dissoc_n)
+    if unipam_n != 0: 
+        pam_repeats=pam_n/unipam_n 
+    else: 
+        pam_repeats= "NA"
+        
+    out.loc[koff] = [move_n, dissoc_n, pam_n, unipam_n, unisite_n, runtime, rdiss, pam_repeats]
+    
+    slide = pd.concat([pd.DataFrame(x.index), pd.DataFrame(np.insert(x.index[:len(x.index)-1]+1,0,0))],axis=1)
+    
+    slide_dist = []
+    for i in range(len(x.index)) :
+        slide_range = res.loc[slide.iloc[i,1]:slide.iloc[i,0],"move"]
+        if 0 in list(slide_range) and DNAlength-1 in list(slide_range) :
+            slide_range = [x+DNAlength if x <= DNAlength/2 else x for x in slide_range]
+        slide_dist.append(max(slide_range) - min(slide_range)+1)
+
+    print("koff = ",koff, ", ",slide_dist)
